@@ -16,6 +16,9 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.Chronometer
 import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.RemoteViews
+import android.widget.TextView
 import com.android.systemui.axdynamicbar.model.IslandEvent
 import com.android.systemui.axdynamicbar.model.RecordingState
 import com.android.systemui.dagger.SysUISingleton
@@ -66,10 +69,29 @@ constructor(
             "com.onefootball.brasil",
         )
 
+        private const val MIN_SPORTS_ICON_SIZE_PX = 24
         private val SCORE_PATTERN =
-            Regex("""(.+?)\s+(\d+)\s*[-–—:]\s*(\d+)\s+(.+)""")
+            Regex(
+                """(.+?)\s+(\d+(?:[./]\d+)?(?:\s*\([^)]+\))?)\s*[-–—:]\s*(\d+(?:[./]\d+)?(?:\s*\([^)]+\))?)\s+(.+)"""
+            )
         private val VS_PATTERN =
             Regex("""(.+?)\s+(?:vs\.?|v\.?|at)\s+(.+)""", RegexOption.IGNORE_CASE)
+        private val STANDALONE_SCORE_PATTERN =
+            Regex("""^\d+(?:[./]\d+)?(?:\s*\([^)]+\))?$""")
+        private val CLOCK_TIME_PATTERN =
+            Regex("""^\d{1,2}:\d{2}(?:\s*[ap]m)?$""", RegexOption.IGNORE_CASE)
+        private val ORDINAL_POSITION_PATTERN =
+            Regex("""^\d{1,2}(?:st|nd|rd|th)\s+position$""", RegexOption.IGNORE_CASE)
+        private val GENERIC_SPORTS_NOISE =
+            listOf(
+                "see table",
+                "game-day breakdown",
+                "get ai-powered insights",
+                "stats, and more",
+                "powered insights",
+                "google",
+                "google sports",
+            )
 
         private const val NOW_PLAYING_PACKAGE = "com.google.android.as"
         private const val NOW_PLAYING_CHANNEL = "ambientmusic"
@@ -137,6 +159,10 @@ constructor(
 
     var onTimerEvent: ((IslandEvent.Timer) -> Unit)? = null
     var onAlarmEvent: ((IslandEvent.Alarm) -> Unit)? = null
+    private data class SportsRemoteContent(
+        val textLines: List<String>,
+        val images: List<Drawable>,
+    )
     var onNotificationPosted: ((IslandEvent.Notification) -> Unit)? = null
     var onScreenRecordNotificationTime: ((Long) -> Unit)? = null
 
@@ -363,9 +389,11 @@ constructor(
 
                 if ("sports" !in disabledTypes) {
                     if (pkg == GOOGLE_PACKAGE) {
-                        val groupKey = sbn.groupKey ?: ""
-                        val isSportsGroup = groupKey.contains("::sports", ignoreCase = true)
-                        if (isSportsGroup && handleSportsScore(sbn, extras, forceCapture = true)) return
+                        if (shouldAttemptGoogleSportsCapture(sbn, extras) &&
+                            handleSportsScore(sbn, extras, forceCapture = true)
+                        ) {
+                            return
+                        }
                     }
                     if (pkg in SPORTS_PACKAGES && handleSportsScore(sbn, extras, forceCapture = true)) return
                 }
@@ -384,11 +412,26 @@ constructor(
                             progressMax > 0 &&
                             progressRaw >= 0)
 
-                if (sbn.isOngoing && hasProgress) {
-                    if ("promoted_ongoing" !in disabledTypes) handlePromotedOngoing(sbn, extras, pkg)
+                val shouldPromoteOngoing =
+                    (sbn.isOngoing && (isPromotable(sbn, extras) || hasProgress)) ||
+                        shouldPromoteProgressNotification(sbn, extras, hasProgress)
+
+                if (shouldPromoteOngoing) {
+                    clearNotificationStateForKey(sbn.key, notifyRemoval = true)
+                    if ("promoted_ongoing" !in disabledTypes) {
+                        handlePromotedOngoing(sbn, extras, pkg)
+                    } else {
+                        clearPromotedOngoing(sbn.key)
+                    }
                     return
                 }
-                if (sbn.isOngoing) return
+
+                clearPromotedOngoing(sbn.key)
+
+                if (sbn.isOngoing) {
+                    clearNotificationStateForKey(sbn.key, notifyRemoval = true)
+                    return
+                }
                 if ("notification" in disabledTypes) return
                 val category = sbn.notification?.category
                 if (category == Notification.CATEGORY_TRANSPORT) return
@@ -599,6 +642,24 @@ constructor(
         current.add(0, event)
         _notificationEvents.value = current
         notifKeyToEventId[event.sbn.key] = event.id
+    }
+
+    private fun clearNotificationStateForKey(
+        key: String,
+        notifyRemoval: Boolean = false,
+    ) {
+        val removedByKey = _notificationEvents.value.filter { it.sbn.key == key }
+        if (removedByKey.isNotEmpty()) {
+            _notificationEvents.value =
+                _notificationEvents.value.filter { it.sbn.key != key }
+            if (notifyRemoval) {
+                removedByKey.forEach { notificationRemovedFlow.tryEmit(it.id) }
+            }
+        } else if (notifyRemoval) {
+            notificationRemovedFlow.tryEmit(key)
+        }
+        activeNotificationKeys.remove(key)
+        notifKeyToEventId.remove(key)
     }
 
     fun clearTimer() {
@@ -844,6 +905,90 @@ constructor(
         return notification.hasPromotableCharacteristics()
     }
 
+    private fun shouldPromoteProgressNotification(
+        sbn: StatusBarNotification,
+        extras: Bundle,
+        hasProgress: Boolean,
+    ): Boolean {
+        if (!hasProgress || sbn.isOngoing) return false
+
+        val notification = sbn.notification ?: return false
+        if (notification.flags and Notification.FLAG_GROUP_SUMMARY != 0) return false
+
+        val progressRaw = extras.getInt(Notification.EXTRA_PROGRESS, -1)
+        val progressMax = extras.getInt(Notification.EXTRA_PROGRESS_MAX, 0)
+        val indeterminate = extras.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE, false)
+
+        val category = notification.category
+        if (category == Notification.CATEGORY_TRANSPORT) return false
+        if (category == Notification.CATEGORY_CALL) return false
+        if (category == Notification.CATEGORY_MESSAGE) return false
+        if (sbn.packageName == activeMediaPackageProvider?.invoke()) return false
+
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
+        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim().orEmpty()
+
+        if (
+            isCompletedProgressNotification(
+                title = title,
+                text = text,
+                bigText = bigText,
+                progressRaw = progressRaw,
+                progressMax = progressMax,
+                indeterminate = indeterminate,
+            )
+        ) {
+            return false
+        }
+
+        return title.isNotEmpty() || text.isNotEmpty() || bigText.isNotEmpty()
+    }
+
+    private fun isCompletedProgressNotification(
+        title: String,
+        text: String,
+        bigText: String,
+        progressRaw: Int,
+        progressMax: Int,
+        indeterminate: Boolean,
+    ): Boolean {
+        if (!indeterminate && progressMax > 0 && progressRaw >= progressMax) {
+            return true
+        }
+
+        val combinedText = listOf(title, text, bigText)
+            .joinToString(" ")
+            .lowercase()
+
+        val zeroTimeRemaining =
+            Regex("""\b0\s*(seconds?|secs?|minutes?|mins?)\s+left\b""").containsMatchIn(
+                combinedText
+            )
+        val completionText =
+            listOf(
+                "complete",
+                "completed",
+                "download complete",
+                "install complete",
+                "downloaded",
+                "installed",
+                "finished",
+                "done",
+                "ready to open",
+            ).any { phrase -> phrase in combinedText }
+
+        if (completionText) {
+            return true
+        }
+
+        if (!indeterminate && progressMax > 0 && progressRaw >= (progressMax - 1)) {
+            if (zeroTimeRemaining) return true
+        }
+
+        return false
+    }
+
     private fun handlePromotedOngoing(sbn: StatusBarNotification, extras: Bundle, pkg: String) {
         val shortCritical =
             try {
@@ -939,10 +1084,28 @@ constructor(
         extras: Bundle,
         forceCapture: Boolean = false,
     ): Boolean {
-        val title = extras.getCharSequence("android.title")?.toString() ?: return false
-        val text = extras.getCharSequence("android.text")?.toString() ?: ""
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
+        val bigText = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim().orEmpty()
+        val subText = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()?.trim().orEmpty()
+        val remoteContent = extractSportsRemoteContent(sbn)
+        val allFields =
+            buildList {
+                add(title)
+                add(text)
+                add(bigText)
+                add(subText)
+                addAll(remoteContent?.textLines.orEmpty().map { it.trim() })
+            }.map { normalizeSportsField(it) }
+                .filter { it.isNotEmpty() }
+                .filterNot { isGenericSportsNoise(it) }
+                .distinct()
 
-        val allFields = listOf(title.trim(), text.trim())
+        if (allFields.isEmpty()) {
+            clearSportsEvent(sbn.key)
+            return false
+        }
+
         val scoreMatch = allFields.firstNotNullOfOrNull { SCORE_PATTERN.find(it) }
 
         var team1Name: String
@@ -956,34 +1119,50 @@ constructor(
             score2 = scoreMatch.groupValues[3]
             team2Name = scoreMatch.groupValues[4].trim()
                 .replace(Regex("""\s*[·•|].*"""), "")
+            if (!looksLikeSportsTeamName(team1Name) || !looksLikeSportsTeamName(team2Name)) {
+                clearSportsEvent(sbn.key)
+                return false
+            }
         } else {
-            val combined = "$title $text"
-            val vsMatch = VS_PATTERN.find(combined)
-            if (vsMatch != null) {
-                team1Name = vsMatch.groupValues[1].trim()
-                    .replace(Regex("""^.*[·•|]\s*"""), "")
-                team2Name = vsMatch.groupValues[2].trim()
-                    .replace(Regex("""\s*[·•|].*$"""), "")
-            } else if (forceCapture) {
-                val parts = text.split("·", "•", "|", " - ", " – ")
-                    .map { it.trim() }.filter { it.isNotEmpty() }
-                if (parts.size >= 2) {
-                    team1Name = parts[0]
-                    team2Name = parts[1]
-                } else {
-                    team1Name = text.ifEmpty { title }
-                    team2Name = ""
+            val matchup =
+                allFields.firstNotNullOfOrNull { extractMatchupFromField(it) }
+                    ?: extractMatchupFromField(title)
+                    ?: extractMatchupFromField(text)
+                    ?: extractMatchupFromField(bigText)
+            if (matchup != null) {
+                team1Name = matchup.first
+                team2Name = matchup.second
+                val standaloneScores =
+                    allFields.mapNotNull { line ->
+                        normalizeSportsField(line).takeIf { STANDALONE_SCORE_PATTERN.matches(it) }
+                    }
+                if (standaloneScores.size >= 2) {
+                    score1 = standaloneScores[0]
+                    score2 = standaloneScores[1]
                 }
             } else {
+                clearSportsEvent(sbn.key)
                 return false
             }
         }
 
-        val isOngoing = sbn.isOngoing
+        val loweredFields = allFields.map { it.lowercase() }
         val status = when {
-            score1.isNotEmpty() && !isOngoing -> IslandEvent.GameStatus.FINAL
-            score1.isNotEmpty() && isOngoing -> IslandEvent.GameStatus.LIVE
-            isOngoing -> IslandEvent.GameStatus.PRE_GAME
+            loweredFields.any { it.contains("halftime") || it.contains("half-time") } ->
+                IslandEvent.GameStatus.HALFTIME
+            loweredFields.any {
+                it.contains("final") ||
+                    it.contains("full time") ||
+                    it == "ft"
+            } -> IslandEvent.GameStatus.FINAL
+            sbn.isOngoing || loweredFields.any {
+                it.contains("live") ||
+                    it.contains("in progress") ||
+                    Regex("""\bq[1-4]\b""").containsMatchIn(it) ||
+                    it.contains("innings") ||
+                    it.contains("over")
+            } -> IslandEvent.GameStatus.LIVE
+            score1.isBlank() && score2.isBlank() -> IslandEvent.GameStatus.PRE_GAME
             else -> IslandEvent.GameStatus.FINAL
         }
 
@@ -999,26 +1178,61 @@ constructor(
                 .replace("-", "").replace("–", "").replace(":", "")
                 .trim()
         }
+        if (statusDetail.isBlank()) {
+            statusDetail =
+                allFields.firstOrNull { field ->
+                    field.contains("live", ignoreCase = true) ||
+                        field.contains("final", ignoreCase = true) ||
+                        field.contains("innings", ignoreCase = true) ||
+                        field.contains("quarter", ignoreCase = true) ||
+                        field.contains("half", ignoreCase = true) ||
+                        field.contains("over", ignoreCase = true)
+                }.orEmpty()
+        }
+        statusDetail = normalizeSportsField(statusDetail)
 
-        val allText = "$title · $text"
-        val league = allText.split("·", "•", "|")
+        val league = allFields.flatMap { field -> field.split("·", "•", "|") }
             .map { it.trim() }
             .firstOrNull { part ->
                 part.length in 2..30 &&
                     !part.any { it.isDigit() } &&
-                    part != team1Name && part != team2Name
+                    part != team1Name &&
+                    part != team2Name &&
+                    !isGenericSportsNoise(part) &&
+                    !CLOCK_TIME_PATTERN.matches(part) &&
+                    !part.contains("vs", ignoreCase = true) &&
+                    !part.contains(" at ", ignoreCase = true)
             } ?: ""
 
-        val commentary = extras.getCharSequence("android.bigText")?.toString()
-            ?: extras.getString("android.subText") ?: ""
+        val commentary =
+            allFields.firstOrNull { field ->
+                val normalized = normalizeSportsField(field)
+                normalized.isNotEmpty() &&
+                    normalized != title &&
+                    normalized != text &&
+                    normalized != bigText &&
+                    normalized != subText &&
+                    normalized != league &&
+                    normalized != statusDetail &&
+                    normalized != team1Name &&
+                    normalized != team2Name &&
+                    !STANDALONE_SCORE_PATTERN.matches(normalized) &&
+                    !SCORE_PATTERN.containsMatchIn(normalized) &&
+                    !VS_PATTERN.containsMatchIn(normalized) &&
+                    !isGenericSportsNoise(normalized) &&
+                    !CLOCK_TIME_PATTERN.matches(normalized)
+            }.orEmpty()
 
         val appIcon = loadNotificationIcon(sbn, sbn.packageName)
+        val (team1Icon, team2Icon) = selectSportsTeamIcons(remoteContent, appIcon)
 
         val event = IslandEvent.Sports(
             team1Name = team1Name,
             team2Name = team2Name,
             score1 = score1,
             score2 = score2,
+            team1Icon = team1Icon,
+            team2Icon = team2Icon,
             status = status,
             statusDetail = statusDetail,
             league = league,
@@ -1033,6 +1247,197 @@ constructor(
         current.add(0, event)
         _sportsEvents.value = current
         return true
+    }
+
+    private fun normalizeSportsField(value: String): String {
+        return value.replace(Regex("""\s+"""), " ").trim().trim('·', '•', '|', '-', '–', '—')
+    }
+
+    private fun extractMatchupFromField(value: String): Pair<String, String>? {
+        val normalized = normalizeSportsField(value)
+        val match = VS_PATTERN.find(normalized) ?: return null
+        val first = normalizeSportsField(match.groupValues[1])
+        val second = normalizeSportsField(match.groupValues[2])
+        return if (looksLikeSportsTeamName(first) && looksLikeSportsTeamName(second)) {
+            first to second
+        } else {
+            null
+        }
+    }
+
+    private fun looksLikeSportsTeamName(value: String): Boolean {
+        val normalized = normalizeSportsField(value)
+        if (normalized.isEmpty()) return false
+        if (normalized.length !in 2..40) return false
+        if (STANDALONE_SCORE_PATTERN.matches(normalized)) return false
+        if (CLOCK_TIME_PATTERN.matches(normalized)) return false
+        if (ORDINAL_POSITION_PATTERN.matches(normalized)) return false
+
+        val lower = normalized.lowercase()
+        if (
+            isGenericSportsNoise(normalized) ||
+                lower.contains("position") ||
+                lower.contains("see table") ||
+                lower.contains("insights") ||
+                lower.contains("powered") ||
+                lower.contains("download") ||
+                lower.contains("google")
+        ) {
+            return false
+        }
+
+        val tokens = normalized.split(Regex("""\s+"""))
+        if (tokens.size > 4) return false
+
+        val compact = normalized.replace(Regex("""[^A-Za-z0-9]"""), "")
+        if (compact.length < 2) return false
+        if (compact.count { it.isDigit() } > 2) return false
+
+        return true
+    }
+
+    private fun isGenericSportsNoise(value: String): Boolean {
+        val normalized = normalizeSportsField(value)
+        if (normalized.isEmpty()) return true
+        val lower = normalized.lowercase()
+        if (CLOCK_TIME_PATTERN.matches(normalized)) return true
+        if (ORDINAL_POSITION_PATTERN.matches(normalized)) return true
+        if (GENERIC_SPORTS_NOISE.any { it in lower }) return true
+        if (lower == "." || lower == "·") return true
+        return false
+    }
+
+    private fun shouldAttemptGoogleSportsCapture(
+        sbn: StatusBarNotification,
+        extras: Bundle,
+    ): Boolean {
+        val groupKey = sbn.groupKey.orEmpty()
+        if (groupKey.contains("::sports", ignoreCase = true)) return true
+
+        val candidates =
+            listOf(
+                extras.getCharSequence(Notification.EXTRA_TITLE)?.toString(),
+                extras.getCharSequence(Notification.EXTRA_TEXT)?.toString(),
+                extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString(),
+                extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString(),
+            ).map { it.orEmpty().trim() }
+                .filter { it.isNotEmpty() }
+
+        if (candidates.any { SCORE_PATTERN.containsMatchIn(it) || VS_PATTERN.containsMatchIn(it) }) {
+            return true
+        }
+
+        return candidates.any { text ->
+            text.contains("live", ignoreCase = true) ||
+                text.contains("final", ignoreCase = true) ||
+                text.contains("innings", ignoreCase = true) ||
+                text.contains("score", ignoreCase = true)
+        }
+    }
+
+    private fun extractSportsRemoteContent(sbn: StatusBarNotification): SportsRemoteContent? {
+        return try {
+            val rv = resolveNotificationRemoteViews(sbn.notification) ?: return null
+            val pkgCtx = context.createPackageContext(sbn.packageName, Context.CONTEXT_RESTRICTED)
+            val container = FrameLayout(context)
+            val inflated = rv.apply(pkgCtx, container) ?: return null
+            SportsRemoteContent(
+                textLines = collectVisibleText(inflated),
+                images = collectVisibleImages(inflated),
+            )
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to extract sports remote content from ${sbn.packageName}", e)
+            null
+        }
+    }
+
+    private fun resolveNotificationRemoteViews(notification: Notification): RemoteViews? {
+        notification.bigContentView?.let { return it }
+        notification.contentView?.let { return it }
+        return try {
+            val builder = Notification.Builder.recoverBuilder(context, notification)
+            builder.createBigContentView() ?: builder.createContentView()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun collectVisibleText(view: View): List<String> {
+        val textLines = mutableListOf<String>()
+        collectVisibleText(view, textLines)
+        return textLines.distinct()
+    }
+
+    private fun collectVisibleText(view: View, textLines: MutableList<String>) {
+        if (view.visibility != View.VISIBLE) return
+        if (view is TextView) {
+            val value = view.text?.toString()?.trim().orEmpty()
+            if (value.isNotEmpty()) {
+                textLines += value
+            }
+        }
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                collectVisibleText(view.getChildAt(i), textLines)
+            }
+        }
+    }
+
+    private fun collectVisibleImages(view: View): List<Drawable> {
+        val images = mutableListOf<Drawable>()
+        collectVisibleImages(view, images)
+        return images
+    }
+
+    private fun collectVisibleImages(view: View, images: MutableList<Drawable>) {
+        if (view.visibility != View.VISIBLE) return
+        if (view is ImageView) {
+            val drawable = view.drawable
+            if (drawable != null) {
+                val width = maxOf(drawable.intrinsicWidth, view.width)
+                val height = maxOf(drawable.intrinsicHeight, view.height)
+                if (width >= MIN_SPORTS_ICON_SIZE_PX && height >= MIN_SPORTS_ICON_SIZE_PX) {
+                    images += cloneDrawable(drawable)
+                }
+            }
+        }
+        if (view is ViewGroup) {
+            for (i in 0 until view.childCount) {
+                collectVisibleImages(view.getChildAt(i), images)
+            }
+        }
+    }
+
+    private fun selectSportsTeamIcons(
+        remoteContent: SportsRemoteContent?,
+        appIcon: Drawable?,
+    ): Pair<Drawable?, Drawable?> {
+        val candidates =
+            remoteContent?.images.orEmpty()
+                .filterNot { candidate -> appIcon != null && drawablesMatch(candidate, appIcon) }
+                .distinctBy { drawableIdentityKey(it) }
+
+        return when {
+            candidates.size >= 2 -> candidates[0] to candidates[1]
+            candidates.size == 1 -> candidates[0] to null
+            else -> null to null
+        }
+    }
+
+    private fun cloneDrawable(drawable: Drawable): Drawable {
+        return drawable.constantState?.newDrawable(context.resources)?.mutate() ?: drawable.mutate()
+    }
+
+    private fun drawablesMatch(first: Drawable, second: Drawable): Boolean {
+        if (first === second) return true
+        val firstState = first.constantState
+        val secondState = second.constantState
+        return firstState != null && secondState != null && firstState == secondState
+    }
+
+    private fun drawableIdentityKey(drawable: Drawable): String {
+        return drawable.constantState?.toString()
+            ?: "${drawable.intrinsicWidth}x${drawable.intrinsicHeight}:${drawable.javaClass.name}"
     }
 
     private fun extractNotificationImage(extras: Bundle, sbn: StatusBarNotification): Drawable? {
@@ -1068,4 +1473,3 @@ constructor(
             }
     }
 }
-

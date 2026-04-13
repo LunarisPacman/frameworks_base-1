@@ -19,6 +19,7 @@ package com.android.systemui.axdynamicbar.ui.compose
 import android.graphics.drawable.Drawable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,6 +31,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -41,85 +43,108 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-
-import com.android.systemui.axdynamicbar.shared.IslandActions
 import com.android.systemui.axdynamicbar.model.IslandEvent
-import com.android.systemui.axdynamicbar.shared.*
+import com.android.systemui.axdynamicbar.shared.AlphaIconBg
+import com.android.systemui.axdynamicbar.shared.CardBorderBrush
+import com.android.systemui.axdynamicbar.shared.DarkCard
+import com.android.systemui.axdynamicbar.shared.IslandActions
+import com.android.systemui.axdynamicbar.shared.OnCardSecondary
+import com.android.systemui.axdynamicbar.shared.OnCardText
+import com.android.systemui.axdynamicbar.shared.ShapeChip
+import com.android.systemui.axdynamicbar.shared.SizeCompactIcon
+import com.android.systemui.axdynamicbar.shared.SpaceLg
+import com.android.systemui.axdynamicbar.shared.SpaceMd
+import com.android.systemui.axdynamicbar.shared.SpaceSm
+import com.android.systemui.axdynamicbar.shared.SpaceXs
+import com.android.systemui.axdynamicbar.shared.SubtleGray
+import com.android.systemui.axdynamicbar.shared.TsBadge
+import com.android.systemui.axdynamicbar.shared.accentColorFor
+import com.android.systemui.axdynamicbar.shared.toScaledBitmap
 import com.android.systemui.res.R
+
+private val TeamPanelShape = RoundedCornerShape(24.dp)
+private val FooterShape = RoundedCornerShape(18.dp)
+private val TeamLogoSize = 52.dp
 
 @Composable
 internal fun SportsExpanded(event: IslandEvent.Sports, interactor: IslandActions) {
     val accent = accentColorFor(event)
+    val badgeLabel = event.statusDetail.ifBlank { sportsStatusLabel(event.status) }
+    val headerLabel =
+        when {
+            event.league.isNotBlank() -> event.league
+            event.team2Name.isNotBlank() ->
+                "${compactTeamLabel(event.team1Name)} vs ${compactTeamLabel(event.team2Name)}"
+            else -> event.team1Name
+        }
+    val footerText =
+        event.commentary.ifBlank {
+            if (event.statusDetail.isNotBlank() && event.statusDetail != badgeLabel) {
+                event.statusDetail
+            } else {
+                ""
+            }
+        }
 
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(SpaceLg),
     ) {
-        if (event.league.isNotEmpty()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(SpaceMd),
+        ) {
             Text(
-                event.league,
+                headerLabel,
+                modifier = Modifier.weight(1f),
                 color = SubtleGray,
-                style = MaterialTheme.typography.labelSmall,
+                style = MaterialTheme.typography.labelMedium,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+            StatusBadge(event.status, accent, badgeLabel)
         }
 
-        StatusBadge(event.status, accent)
-
-        if (event.team2Name.isNotEmpty()) {
+        if (event.team2Name.isNotBlank()) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(SpaceMd),
+                verticalAlignment = Alignment.Top,
             ) {
-                TeamColumn(event.team1Name, event.team1Icon?.toScaledBitmap(48.dp))
-                if (event.score1.isNotEmpty()) {
-                    ScoreDisplay(event.score1, event.score2, accent)
-                } else {
-                    Text(
-                        stringResource(R.string.ax_dynamic_bar_sports_vs),
-                        color = SubtleGray,
-                        style = MaterialTheme.typography.headlineSmall,
-                        fontWeight = FontWeight.Light,
-                    )
-                }
-                TeamColumn(event.team2Name, event.team2Icon?.toScaledBitmap(48.dp))
+                TeamScorePanel(
+                    name = event.team1Name,
+                    score = event.score1,
+                    icon = event.team1Icon,
+                    accent = accent,
+                    modifier = Modifier.weight(1f),
+                )
+                TeamScorePanel(
+                    name = event.team2Name,
+                    score = event.score2,
+                    icon = event.team2Icon,
+                    accent = accent,
+                    modifier = Modifier.weight(1f),
+                )
             }
         } else {
-            Text(
-                event.team1Name,
-                color = OnCardText,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
+            TeamScorePanel(
+                name = event.team1Name,
+                score = event.score1,
+                icon = event.team1Icon ?: event.appIcon,
+                accent = accent,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
 
-        if (event.statusDetail.isNotEmpty()) {
-            Text(
-                event.statusDetail,
-                color = OnCardSecondary,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-
-        if (event.commentary.isNotEmpty()) {
-            Text(
-                event.commentary,
-                color = OnCardSecondary,
-                style = MaterialTheme.typography.bodySmall,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.fillMaxWidth(),
+        if (footerText.isNotBlank()) {
+            CommentaryStrip(
+                text = footerText,
+                accent = accent,
             )
         }
     }
@@ -128,45 +153,41 @@ internal fun SportsExpanded(event: IslandEvent.Sports, interactor: IslandActions
 @Composable
 internal fun RowScope.CompactSportsRow(event: IslandEvent.Sports) {
     val accent = accentColorFor(event)
-
-    CompactTeamBadge(event.team1Name, event.team1Icon, accent)
-
-    Spacer(Modifier.width(SpaceSm))
-
-    if (event.team2Name.isNotEmpty()) {
-        if (event.score1.isNotEmpty()) {
-            Text(
-                "${event.score1} - ${event.score2}",
-                color = accent,
-                style = MaterialTheme.typography.titleSmall,
-                maxLines = 1,
-            )
-        } else {
-            Text(
-                stringResource(R.string.ax_dynamic_bar_sports_vs),
-                color = SubtleGray,
-                style = MaterialTheme.typography.labelSmall,
-                maxLines = 1,
-            )
+    val centerText =
+        when {
+            event.score1.isNotBlank() -> "${event.score1} - ${event.score2}"
+            event.team2Name.isBlank() -> compactTeamLabel(event.team1Name)
+            else -> stringResource(R.string.ax_dynamic_bar_sports_vs)
         }
 
-        Spacer(Modifier.width(SpaceSm))
+    CompactTeamBadge(event.team1Name, event.team1Icon, accent)
+    Spacer(Modifier.width(SpaceSm))
 
-        CompactTeamBadge(event.team2Name, event.team2Icon, accent)
-    } else {
+    Column(
+        modifier = Modifier.weight(1f),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
         Text(
-            event.team1Name,
-            color = OnCardText,
-            style = MaterialTheme.typography.bodySmall,
+            centerText,
+            color = accent,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
+        )
+        Text(
+            sportsStatusLabel(event.status),
+            color = SubtleGray,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
         )
     }
 
-    Spacer(Modifier.width(SpaceSm))
-
-    StatusBadge(event.status, accent)
+    if (event.team2Name.isNotBlank()) {
+        Spacer(Modifier.width(SpaceSm))
+        CompactTeamBadge(event.team2Name, event.team2Icon, accent)
+    }
 }
 
 @Composable
@@ -179,82 +200,106 @@ private fun CompactTeamBadge(name: String, icon: Drawable?, accent: Color) {
             contentScale = ContentScale.Crop,
         )
     } ?: Box(
-        modifier = Modifier.size(SizeCompactIcon).clip(CircleShape).background(accent.copy(alpha = AlphaIconBg)),
+        modifier =
+            Modifier.size(SizeCompactIcon)
+                .clip(CircleShape)
+                .background(accent.copy(alpha = AlphaIconBg)),
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            name.take(3).uppercase(),
+            compactTeamLabel(name),
             color = accent,
             style = TsBadge,
+            maxLines = 1,
         )
     }
 }
 
 @Composable
-private fun TeamColumn(
+private fun TeamScorePanel(
     name: String,
-    icon: ImageBitmap?,
+    score: String,
+    icon: Drawable?,
+    accent: Color,
+    modifier: Modifier = Modifier,
 ) {
-    Column(
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(SpaceMd),
-        modifier = Modifier.width(80.dp),
+    val primaryLabel = compactTeamLabel(name)
+    val secondaryLabel = expandedTeamLabel(name, primaryLabel)
+
+    Surface(
+        modifier = modifier.border(1.dp, CardBorderBrush, TeamPanelShape),
+        shape = TeamPanelShape,
+        color = DarkCard.copy(alpha = 0.82f),
     ) {
-        if (icon != null) {
-            Image(
-                bitmap = icon,
-                contentDescription = name,
-                modifier = Modifier.size(48.dp).clip(CircleShape),
-                contentScale = ContentScale.Crop,
-            )
-        } else {
-            Box(
-                modifier = Modifier.size(48.dp).clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh),
-                contentAlignment = Alignment.Center,
-            ) {
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = SpaceLg, vertical = SpaceLg),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(SpaceSm),
+        ) {
+            TeamAvatar(name = name, icon = icon, accent = accent)
+
+            if (score.isNotBlank()) {
                 Text(
-                    name.take(3).uppercase(),
+                    score,
                     color = OnCardText,
-                    style = MaterialTheme.typography.labelSmall,
+                    style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                )
+                Text(
+                    primaryLabel,
+                    color = OnCardText,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                )
+            } else {
+                Text(
+                    primaryLabel,
+                    color = OnCardText,
+                    style = MaterialTheme.typography.headlineSmall,
+                    fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                )
+            }
+
+            if (secondaryLabel.isNotBlank()) {
+                Text(
+                    secondaryLabel,
+                    color = OnCardSecondary,
+                    style = MaterialTheme.typography.labelSmall,
+                    textAlign = TextAlign.Center,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
                 )
             }
         }
-        Text(
-            name,
-            color = OnCardText,
-            style = MaterialTheme.typography.bodySmall,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            textAlign = TextAlign.Center,
-        )
     }
 }
 
 @Composable
-private fun ScoreDisplay(score1: String, score2: String, accent: Color) {
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(SpaceMd),
+private fun TeamAvatar(name: String, icon: Drawable?, accent: Color) {
+    icon?.let {
+        Image(
+            bitmap = it.toScaledBitmap(TeamLogoSize),
+            contentDescription = name,
+            modifier = Modifier.size(TeamLogoSize).clip(CircleShape),
+            contentScale = ContentScale.Crop,
+        )
+    } ?: Box(
+        modifier =
+            Modifier.size(TeamLogoSize)
+                .clip(CircleShape)
+                .background(accent.copy(alpha = AlphaIconBg)),
+        contentAlignment = Alignment.Center,
     ) {
         Text(
-            score1,
-            color = OnCardText,
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.Bold,
-            maxLines = 1,
-        )
-        Text(
-            "-",
-            color = SubtleGray,
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Light,
-        )
-        Text(
-            score2,
-            color = OnCardText,
-            style = MaterialTheme.typography.headlineMedium,
+            compactTeamLabel(name),
+            color = accent,
+            style = MaterialTheme.typography.titleSmall,
             fontWeight = FontWeight.Bold,
             maxLines = 1,
         )
@@ -262,13 +307,30 @@ private fun ScoreDisplay(score1: String, score2: String, accent: Color) {
 }
 
 @Composable
-private fun StatusBadge(status: IslandEvent.GameStatus, accent: Color) {
-    val label = when (status) {
-        IslandEvent.GameStatus.LIVE -> stringResource(R.string.ax_dynamic_bar_sports_live)
-        IslandEvent.GameStatus.FINAL -> stringResource(R.string.ax_dynamic_bar_sports_final)
-        IslandEvent.GameStatus.HALFTIME -> stringResource(R.string.ax_dynamic_bar_sports_halftime)
-        IslandEvent.GameStatus.PRE_GAME -> stringResource(R.string.ax_dynamic_bar_sports_upcoming)
+private fun CommentaryStrip(text: String, accent: Color) {
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = FooterShape,
+        color = accent.copy(alpha = 0.12f),
+    ) {
+        Text(
+            text = text,
+            color = OnCardSecondary,
+            style = MaterialTheme.typography.bodySmall,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = SpaceLg, vertical = SpaceMd),
+        )
     }
+}
+
+@Composable
+private fun StatusBadge(
+    status: IslandEvent.GameStatus,
+    accent: Color,
+    label: String,
+) {
     Surface(
         shape = ShapeChip,
         color = accent.copy(alpha = AlphaIconBg),
@@ -281,8 +343,50 @@ private fun StatusBadge(status: IslandEvent.GameStatus, accent: Color) {
             if (status == IslandEvent.GameStatus.LIVE) {
                 PulsingDot(color = accent, size = 6.dp)
             }
-            Text(label, color = accent, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold)
+            Text(
+                label,
+                color = accent,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
 
+@Composable
+private fun sportsStatusLabel(status: IslandEvent.GameStatus): String {
+    return when (status) {
+        IslandEvent.GameStatus.LIVE -> stringResource(R.string.ax_dynamic_bar_sports_live)
+        IslandEvent.GameStatus.FINAL -> stringResource(R.string.ax_dynamic_bar_sports_final)
+        IslandEvent.GameStatus.HALFTIME -> stringResource(R.string.ax_dynamic_bar_sports_halftime)
+        IslandEvent.GameStatus.PRE_GAME -> stringResource(R.string.ax_dynamic_bar_sports_upcoming)
+    }
+}
+
+private fun compactTeamLabel(name: String): String {
+    val trimmed = name.trim()
+    if (trimmed.isEmpty()) return "--"
+    if (!trimmed.contains(' ') && trimmed.length <= 4) {
+        return trimmed.uppercase()
+    }
+
+    val tokens =
+        trimmed.split(Regex("""[\s\-/]+"""))
+            .mapNotNull { token -> token.firstOrNull()?.takeIf { it.isLetterOrDigit() } }
+    if (tokens.size >= 2) {
+        return tokens.take(3).joinToString(separator = "") { it.uppercase() }
+    }
+
+    return trimmed.take(3).uppercase()
+}
+
+private fun expandedTeamLabel(name: String, compactLabel: String): String {
+    val trimmed = name.trim()
+    return if (trimmed.equals(compactLabel, ignoreCase = true)) {
+        ""
+    } else {
+        trimmed
+    }
+}
