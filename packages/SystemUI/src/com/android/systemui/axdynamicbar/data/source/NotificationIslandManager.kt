@@ -70,6 +70,8 @@ constructor(
         )
 
         private const val MIN_SPORTS_ICON_SIZE_PX = 24
+        private const val PROMOTED_ONGOING_TERMINAL_TIMEOUT_MS = 8_000L
+        private const val PROMOTED_ONGOING_STALE_TIMEOUT_MS = 12_000L
         private val SCORE_PATTERN =
             Regex(
                 """(.+?)\s+(\d+(?:[./]\d+)?(?:\s*\([^)]+\))?)\s*[-–—:]\s*(\d+(?:[./]\d+)?(?:\s*\([^)]+\))?)\s+(.+)"""
@@ -150,6 +152,7 @@ constructor(
     var activeMediaPackageProvider: (() -> String?)? = null
 
     private val activeNotificationKeys = mutableSetOf<String>()
+    private val promotedOngoingState = mutableMapOf<String, TrackedPromotedOngoingState>()
 
     private val notifKeyToEventId = mutableMapOf<String, String>()
 
@@ -159,6 +162,16 @@ constructor(
 
     var onTimerEvent: ((IslandEvent.Timer) -> Unit)? = null
     var onAlarmEvent: ((IslandEvent.Alarm) -> Unit)? = null
+    private data class TrackedPromotedOngoingState(
+        val lastProgressRaw: Int,
+        val lastProgressMax: Int,
+        val lastTitle: String,
+        val lastText: String,
+        val lastBigText: String,
+        val lastMeaningfulUpdateElapsedMs: Long,
+        val terminalSinceElapsedMs: Long?,
+        val sawProgressActivity: Boolean,
+    )
     private data class SportsRemoteContent(
         val textLines: List<String>,
         val images: List<Drawable>,
@@ -182,6 +195,7 @@ constructor(
                 activeNotificationKeys.remove(key)
                 activeCallKeys.remove(key)
                 activeAlarmKeys.remove(key)
+                promotedOngoingState.remove(key)
 
                 if (key == timerNotificationKey) {
                     timerNotificationKey = null
@@ -399,6 +413,10 @@ constructor(
                 }
 
                 if (sbn.isOngoing && isPromotable(sbn, extras)) {
+                    if (shouldExpirePromotedOngoing(sbn, extras)) {
+                        clearPromotedOngoing(sbn.key)
+                        return
+                    }
                     if ("promoted_ongoing" !in disabledTypes) handlePromotedOngoing(sbn, extras, pkg)
                     return
                 }
@@ -417,6 +435,10 @@ constructor(
                         shouldPromoteProgressNotification(sbn, extras, hasProgress)
 
                 if (shouldPromoteOngoing) {
+                    if (shouldExpirePromotedOngoing(sbn, extras)) {
+                        clearPromotedOngoing(sbn.key)
+                        return
+                    }
                     clearNotificationStateForKey(sbn.key, notifyRemoval = true)
                     if ("promoted_ongoing" !in disabledTypes) {
                         handlePromotedOngoing(sbn, extras, pkg)
@@ -604,6 +626,7 @@ constructor(
         activeNotificationKeys.clear()
         activeCallKeys.clear()
         activeAlarmKeys.clear()
+        promotedOngoingState.clear()
         notifKeyToEventId.clear()
         timerJob?.cancel()
         timerJob = null
@@ -945,6 +968,121 @@ constructor(
         return title.isNotEmpty() || text.isNotEmpty() || bigText.isNotEmpty()
     }
 
+    private fun shouldExpirePromotedOngoing(
+        sbn: StatusBarNotification,
+        extras: Bundle,
+    ): Boolean {
+        val progressRaw = extras.getInt(Notification.EXTRA_PROGRESS, -1)
+        val progressMax = extras.getInt(Notification.EXTRA_PROGRESS_MAX, 0)
+        val indeterminate = extras.getBoolean(Notification.EXTRA_PROGRESS_INDETERMINATE, false)
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
+        val bigText =
+            extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim().orEmpty()
+        val previous = promotedOngoingState[sbn.key]
+        val now = SystemClock.elapsedRealtime()
+
+        val textChanged =
+            previous == null ||
+                previous.lastTitle != title ||
+                previous.lastText != text ||
+                previous.lastBigText != bigText
+        val progressChanged =
+            previous == null ||
+                previous.lastProgressRaw != progressRaw ||
+                previous.lastProgressMax != progressMax
+        val meaningfulUpdate = textChanged || progressChanged
+        val sawProgressActivity =
+            previous?.sawProgressActivity == true ||
+                (progressRaw > 0 && progressMax > 0) ||
+                (previous != null &&
+                    progressRaw >= 0 &&
+                    previous.lastProgressRaw >= 0 &&
+                    progressRaw > previous.lastProgressRaw)
+        val nearTerminal =
+            !indeterminate &&
+                progressMax > 0 &&
+                progressRaw >= ((progressMax * 97) / 100).coerceAtLeast(1)
+        val terminalNow =
+            isCompletedProgressNotification(
+                title = title,
+                text = text,
+                bigText = bigText,
+                progressRaw = progressRaw,
+                progressMax = progressMax,
+                indeterminate = indeterminate,
+            )
+        val lastMeaningfulUpdateElapsedMs =
+            if (meaningfulUpdate) now else previous?.lastMeaningfulUpdateElapsedMs ?: now
+        val terminalSinceElapsedMs =
+            if (terminalNow || nearTerminal) {
+                if (previous?.terminalSinceElapsedMs != null && !meaningfulUpdate) {
+                    previous.terminalSinceElapsedMs
+                } else {
+                    now
+                }
+            } else {
+                null
+            }
+
+        promotedOngoingState[sbn.key] =
+            TrackedPromotedOngoingState(
+                lastProgressRaw = progressRaw,
+                lastProgressMax = progressMax,
+                lastTitle = title,
+                lastText = text,
+                lastBigText = bigText,
+                lastMeaningfulUpdateElapsedMs = lastMeaningfulUpdateElapsedMs,
+                terminalSinceElapsedMs = terminalSinceElapsedMs,
+                sawProgressActivity = sawProgressActivity,
+            )
+
+        if (!isTaskLikePromotedNotification(title, text, bigText, progressRaw, progressMax)) {
+            return false
+        }
+
+        if (terminalNow && terminalSinceElapsedMs != null) {
+            return now - terminalSinceElapsedMs >= PROMOTED_ONGOING_TERMINAL_TIMEOUT_MS
+        }
+
+        if (nearTerminal && sawProgressActivity) {
+            return now - lastMeaningfulUpdateElapsedMs >= PROMOTED_ONGOING_STALE_TIMEOUT_MS
+        }
+
+        return false
+    }
+
+    private fun isTaskLikePromotedNotification(
+        title: String,
+        text: String,
+        bigText: String,
+        progressRaw: Int,
+        progressMax: Int,
+    ): Boolean {
+        if (progressRaw >= 0 && progressMax > 0) return true
+
+        val combinedText = listOf(title, text, bigText).joinToString(" ").lowercase()
+        return listOf(
+            "download",
+            "install",
+            "update",
+            "upload",
+            "transfer",
+            "copy",
+            "move",
+            "sync",
+            "backup",
+            "restore",
+            "extract",
+            "import",
+            "export",
+            "processing",
+            "finishing",
+            "sending",
+            "receiving",
+        ).any { it in combinedText }
+    }
+
     private fun isCompletedProgressNotification(
         title: String,
         text: String,
@@ -1031,6 +1169,7 @@ constructor(
     }
 
     fun clearPromotedOngoing(key: String) {
+        promotedOngoingState.remove(key)
         _promotedOngoingEvents.value = _promotedOngoingEvents.value.filter { it.sbn.key != key }
     }
 
