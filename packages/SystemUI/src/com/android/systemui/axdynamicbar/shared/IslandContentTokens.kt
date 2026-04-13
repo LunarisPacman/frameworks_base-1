@@ -214,6 +214,9 @@ internal data class IslandColorScheme(
     val onAccent: Color,
     val tonal: Color,
     val surfaceTint: Color,
+    val backgroundStart: Color,
+    val backgroundEnd: Color,
+    val artworkScrim: Color,
 )
 
 @Composable
@@ -222,8 +225,20 @@ internal fun rememberIslandColors(event: IslandEvent): IslandColorScheme =
 
 @Composable
 internal fun rememberMediaColors(event: IslandEvent.Media): IslandColorScheme {
-    val raw = if (event.mediaColor != 0) Color(event.mediaColor) else PurpleAccent
-    return buildColorScheme(raw)
+    val fallback =
+        when {
+            event.mediaColor != 0 -> Color(event.mediaColor)
+            else -> PurpleAccent
+        }
+    val artworkColor = event.albumArt?.let { rememberPaletteColor(it, sampleSizePx = 64) }
+    val appColor =
+        if (event.albumArt == null) {
+            event.appIcon?.let { rememberPaletteColor(it, sampleSizePx = 32) }
+        } else {
+            null
+        }
+    val raw = artworkColor ?: appColor ?: fallback
+    return buildMediaColorScheme(raw)
 }
 
 @Composable
@@ -237,6 +252,32 @@ private fun buildColorScheme(raw: Color): IslandColorScheme {
         onAccent = chipContentColorOn(accent),
         tonal = accent.copy(alpha = AlphaFaint),
         surfaceTint = if (isDark) darkenColor(raw, keep = 0.25f) else accent.copy(alpha = 0.12f),
+        backgroundStart = if (isDark) darkenColor(raw, keep = 0.30f) else accent.copy(alpha = 0.10f),
+        backgroundEnd = if (isDark) darkenColor(raw, keep = 0.20f) else accent.copy(alpha = 0.16f),
+        artworkScrim = Color.Black.copy(alpha = if (isDark) 0.28f else 0.14f),
+    )
+}
+
+@Composable
+private fun buildMediaColorScheme(raw: Color): IslandColorScheme {
+    val isDark =
+        ColorUtils.calculateLuminance(MaterialTheme.colorScheme.surface.toArgb()) < 0.5
+    val accent = ensureContrast(raw, isDark)
+    val backgroundStart = darkenColor(raw, keep = if (isDark) 0.34f else 0.42f)
+    val backgroundEnd = darkenColor(raw, keep = if (isDark) 0.18f else 0.26f)
+    return IslandColorScheme(
+        accent = accent,
+        onAccent = chipContentColorOn(accent),
+        tonal = accent.copy(alpha = 0.18f),
+        surfaceTint =
+            if (isDark) {
+                backgroundStart.copy(alpha = 0.82f)
+            } else {
+                backgroundStart.copy(alpha = 0.72f)
+            },
+        backgroundStart = backgroundStart,
+        backgroundEnd = backgroundEnd,
+        artworkScrim = Color.Black.copy(alpha = if (isDark) 0.46f else 0.34f),
     )
 }
 
@@ -247,8 +288,14 @@ private fun ensureContrast(color: Color): Color {
 
 @Composable
 internal fun chipAccentColorFor(event: IslandEvent): Color {
-    if (event is IslandEvent.Media && event.mediaColor != 0) {
-        return darkenColor(Color(event.mediaColor))
+    if (event is IslandEvent.Media) {
+        val artworkColor = event.albumArt?.let { rememberPaletteColor(it, sampleSizePx = 48) }
+        val raw =
+            artworkColor
+                ?: if (event.mediaColor != 0) Color(event.mediaColor) else null
+        if (raw != null) {
+            return darkenColor(raw, keep = if (event.isPlaying) 0.42f else 0.32f)
+        }
     }
     if (event is IslandEvent.AppSwitch) {
         val app = event.previousApp ?: event.recentApps.firstOrNull()
@@ -266,11 +313,11 @@ internal fun chipAccentColorFor(event: IslandEvent): Color {
 }
 
 @Composable
-private fun rememberPaletteColor(drawable: Drawable): Color? {
-    val color by produceState<Color?>(null, drawable) {
+private fun rememberPaletteColor(drawable: Drawable, sampleSizePx: Int = 24): Color? {
+    val color by produceState<Color?>(null, drawable, sampleSizePx) {
         
         val bitmap = try {
-            withContext(Dispatchers.Main) { drawable.toBitmap(24, 24) }
+            withContext(Dispatchers.Main) { drawable.toBitmap(sampleSizePx, sampleSizePx) }
         } catch (_: Exception) { null }
         value = bitmap?.let {
             withContext(Dispatchers.Default) {
@@ -462,6 +509,11 @@ internal fun formatElapsedTime(ms: Long): String {
     return "%d:%02d".format(secs / 60, secs % 60)
 }
 
+internal fun formatCountdownSeconds(secs: Long): String {
+    val s = secs.coerceAtLeast(0)
+    return "%02d:%02d".format(s / 60, s % 60)
+}
+
 internal fun formatCountdownLong(ms: Long): String {
     val secs = (ms / 1000).coerceAtLeast(0)
     val mins = secs / 60
@@ -543,9 +595,23 @@ internal fun resolveCustomActionIcon(label: String): ImageVector {
         lower.contains("repeat") -> Icons.Filled.Repeat
         lower.contains("thumb") && lower.contains("up") -> Icons.Filled.ThumbUp
         lower.contains("thumb") && lower.contains("down") -> Icons.Filled.ThumbDown
-        lower.contains("like") || lower.contains("love") || lower.contains("favorite") -> Icons.Filled.Favorite
+        lower.contains("like") || lower.contains("love") || lower.contains("favorite") -> Icons.Filled.FavoriteBorder
         else -> Icons.Filled.Shuffle
     }
+}
+
+@Composable
+internal fun CustomActionIcon(
+    ca: IslandEvent.MediaCustomAction,
+    tint: Color,
+    modifier: Modifier = Modifier,
+) {
+    Icon(
+        imageVector = resolveCustomActionIcon(ca.label),
+        contentDescription = ca.label,
+        tint = tint,
+        modifier = modifier,
+    )
 }
 
 internal fun resolveEndActionIcon(label: String): ImageVector {
@@ -566,4 +632,3 @@ internal fun PendingIntent.sendWithBal(context: Context, fillIntent: Intent? = n
     )
     send(context, 0, fillIntent, null, null, null, options.toBundle())
 }
-

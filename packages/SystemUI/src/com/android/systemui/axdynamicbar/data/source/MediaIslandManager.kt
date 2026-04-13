@@ -164,10 +164,14 @@ constructor(
                 val artist = metadata?.getString(MediaMetadata.METADATA_KEY_ARTIST) ?: ""
                 val duration = metadata?.getLong(MediaMetadata.METADATA_KEY_DURATION) ?: 0L
                 
-                val albumArt = sessionAlbumArt ?: run {
-                    val bmp = metadata?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+                val metadataAlbumArt =
+                    metadata?.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
                         ?: metadata?.getBitmap(MediaMetadata.METADATA_KEY_ART)
-                    bmp?.let { BitmapDrawable(context.resources, it) }
+                val albumArt =
+                    metadataAlbumArt?.let { BitmapDrawable(context.resources, it) }
+                        ?: sessionAlbumArt
+                if (metadataAlbumArt != null) {
+                    sessionAlbumArt = albumArt
                 }
 
                 val controller = getActiveController()
@@ -340,4 +344,3 @@ constructor(
         }
     }
 }
-

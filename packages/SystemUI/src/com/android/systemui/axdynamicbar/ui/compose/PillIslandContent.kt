@@ -196,6 +196,7 @@ private fun AnimatedTrophyIcon(color: Color) {
 
 @Composable
 private fun MediaPillIcon(event: IslandEvent.Media) {
+    val accent = rememberMediaColors(event).accent
     event.albumArt?.let { art ->
         Image(
             bitmap = art.toScaledBitmap(16.dp),
@@ -206,10 +207,10 @@ private fun MediaPillIcon(event: IslandEvent.Media) {
     }
         ?: Box(
             modifier =
-                Modifier.size(16.dp).clip(CircleShape).background(OrangeAccent.copy(alpha = AlphaSubtle + 0.05f)),
+                Modifier.size(16.dp).clip(CircleShape).background(accent.copy(alpha = AlphaSubtle + 0.05f)),
             contentAlignment = Alignment.Center,
         ) {
-            WaveformAnimation(OrangeAccent, Modifier.size(10.dp), isAnimating = event.isPlaying, barCount = 3)
+            WaveformAnimation(accent, Modifier.size(10.dp), isAnimating = event.isPlaying, barCount = 3)
         }
 }
 
@@ -1098,7 +1099,8 @@ private fun AudioRecText(event: IslandEvent.AudioRecording, modifier: Modifier, 
 
 @Composable
 private fun MediaTitleText(event: IslandEvent.Media, modifier: Modifier, overrideColor: Color? = null) {
-    val color = (overrideColor ?: OrangeAccent).copy(
+    val fallbackColor = rememberMediaColors(event).accent
+    val color = (overrideColor ?: fallbackColor).copy(
         alpha = if (event.isPlaying) 1f else AlphaHint
     )
     val title = event.track.ifEmpty {
@@ -1303,4 +1305,3 @@ fun WaveformAnimation(color: Color, modifier: Modifier = Modifier.size(34.dp, 20
         }
     }
 }
-
